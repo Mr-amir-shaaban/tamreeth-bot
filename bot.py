@@ -114,13 +114,23 @@ def move_file_in_db(row_id: int, new_subject_id: str):
     conn.close()
 
 
+# دالة البحث المعدلة لتجلب رقم ID الصغير لتجنب مشكلة حجم أزرار التليجرام
 def search_files_by_name(query_text: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT file_id, file_name FROM files WHERE file_name LIKE ? LIMIT 15", (f"%{query_text}%",))
+    c.execute("SELECT id, file_name FROM files WHERE file_name LIKE ? LIMIT 15", (f"%{query_text}%",))
     rows = c.fetchall()
     conn.close()
     return rows
+
+# دالة جديدة مساعدة لجلب الملف عبر رقمه
+def get_file_id_by_row_id(row_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT file_id FROM files WHERE id = ?", (row_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 
 def get_all_admins():
@@ -154,7 +164,6 @@ def remove_admin(admin_id: int):
     conn.close()
 
 
-# تم حذف القسم التمهيدي بناءً على طلبك
 SUBJECTS = [
     ("1", "💊 Medical Terminology"),
     ("2", "🫀 Anatomy"),
@@ -212,8 +221,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     context.user_data.clear()
     
-    # خدعة لمسح الكيبورد القديم (الترم الأول، الترم الثاني...) من شاشة المستخدم
-    temp_msg = await update.message.reply_text("🔄 جاري تحديث البوت...", reply_markup=ReplyKeyboardRemove())
+    temp_msg = await update.message.reply_text("🔄 جاري التحديث...", reply_markup=ReplyKeyboardRemove())
     await temp_msg.delete()
     
     text = (
@@ -273,17 +281,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back_main")]])
         )
 
+    # التعديل هنا لحل مشكلة إرسال الملف من البحث
     elif data.startswith("send_file_"):
-        file_id = data.replace("send_file_", "")
-        try:
-            await context.bot.send_document(chat_id=query.message.chat_id, document=file_id)
-        except Exception:
-            await query.message.reply_text("⚠️ عذراً، تعذر إرسال هذا الملف.")
+        row_id = int(data.replace("send_file_", ""))
+        file_id = get_file_id_by_row_id(row_id)
+        if file_id:
+            try:
+                await context.bot.send_document(chat_id=query.message.chat_id, document=file_id)
+            except Exception:
+                await query.message.reply_text("⚠️ عذراً، تعذر إرسال هذا الملف.")
+        else:
+            await query.answer("⚠️ الملف غير موجود بقاعدة البيانات.", show_alert=True)
 
     # --- لوحة تحكم المشرف ---
     elif data == "admin_panel":
         if not is_admin(user_id): return
-        context.user_data.clear() # تنظيف الحالات السابقة
+        context.user_data.clear() 
         await query.edit_message_text("🔧 *لوحة المشرف*\n\nاختر ما تريد:", parse_mode="Markdown", reply_markup=admin_panel_keyboard())
 
     elif data == "admin_add_info":
@@ -478,9 +491,8 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # --- 1. التحقق من حالات المشرف (تعديل اسم أو إضافة مشرف) ---
+    # --- 1. التحقق من حالات المشرف ---
     if is_admin(user_id):
-        # حالة تعديل اسم الملف
         if context.user_data.get("waiting_for_new_filename"):
             row_id = context.user_data.get("edit_file_row_id")
             if row_id is not None:
@@ -490,10 +502,9 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_panel")]])
                 )
-            context.user_data.clear() # تفريغ الحالة بعد الانتهاء
+            context.user_data.clear()
             return
 
-        # حالة إضافة مشرف
         if context.user_data.get("waiting_for_admin_id"):
             if not text.isdigit():
                 await update.message.reply_text("⚠️ يرجى إرسال الـ ID كأرقام فقط.")
@@ -504,16 +515,16 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.clear()
             return
 
-    # --- 2. البحث الافتراضي المباشر للجميع ---
-    # إذا أرسل المستخدم أي نص عادي لا علاقة له بالأوامر السابقة، سيعتبره البوت بحثاً
+    # --- 2. البحث والتعديل الخاص بالأزرار ---
+    # التعديل هنا لإنشاء الزر بالرقم التسلسلي
     results = search_files_by_name(text)
     if not results:
         await update.message.reply_text(f"🔍 لم أجد أي ملف يحتوي على الاسم: *\"{text}\"* 😢\n\nتأكد من الحروف أو تصفح المواد.", parse_mode="Markdown")
         return
     
     keyboard = []
-    for file_id, file_name in results:
-        keyboard.append([InlineKeyboardButton(f"📄 {file_name}", callback_data=f"send_file_{file_id}")])
+    for row_id, file_name in results:
+        keyboard.append([InlineKeyboardButton(f"📄 {file_name}", callback_data=f"send_file_{row_id}")])
     keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back_main")])
     
     await update.message.reply_text(f"🔍 *نتائج البحث عن:* \"{text}\"\n\nاضغط على الملف للتحميل:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -541,8 +552,6 @@ def main():
     app.add_handler(CallbackQueryHandler(save_file_handler, pattern=r"^save_|^cancel_save$"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
-    # التقاط أي نص عادي لتحويله للبحث أو التعديل
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
