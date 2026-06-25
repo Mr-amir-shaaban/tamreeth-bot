@@ -16,30 +16,26 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DB_PATH = os.path.join(os.path.dirname(__file__), "files.db")
 
-ADMIN_IDS = {7351394218}
-
-SUBJECTS = [
-    ("1", "💊 Medical Terminology"),
-    ("2", "🫀 Anatomy"),
-    ("3", "🧪 Biochemistry"),
-    ("4", "🔡 English"),
-    ("5", "🔬 Physiology"),
-    ("6", "🦠 Microbiology"),
-    ("7", "📊 Biostatistics"),
-    ("8", "🧬 Biological"),
-]
-
-INTRO_SUBJECT_ID = "0"
-ALL_SECTIONS = [("0", "📚 القسم التمهيدي")] + list(SUBJECTS)
+# المشرف الأساسي (المالك) الذي لا يمكن حذفه أبداً من البوت
+PRIMARY_ADMIN = 7351394218
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    if user_id == PRIMARY_ADMIN:
+        return True
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM admins WHERE admin_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
 
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # جدول الملفات
     c.execute("""
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,9 +45,16 @@ def init_db():
             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # جدول المشرفين الجديد
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            admin_id INTEGER PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
-    logger.info("✅ قاعدة البيانات جاهزة")
+    logger.info("✅ قاعدة البيانات جاهزة ومحدثة")
 
 
 def get_files(subject_id: str):
@@ -99,6 +102,53 @@ def delete_file_by_id(row_id: int):
     conn.commit()
     conn.close()
 
+# --- دالات إدارة المشرفين في قاعدة البيانات ---
+def get_all_admins():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin_id FROM admins")
+    rows = c.fetchall()
+    conn.close()
+    # دمج المشرف الأساسي مع المشرفين المضافين
+    admins_list = [PRIMARY_ADMIN] + [row[0] for row in rows if row[0] != PRIMARY_ADMIN]
+    return admins_list
+
+
+def add_admin(admin_id: int) -> bool:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT OR IGNORE INTO admins (admin_id) VALUES (?)", (admin_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"خطأ أثناء إضافة مشرف: {e}")
+        return False
+
+
+def remove_admin(admin_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM admins WHERE admin_id = ?", (admin_id,))
+    conn.commit()
+    conn.close()
+
+
+SUBJECTS = [
+    ("1", "💊 Medical Terminology"),
+    ("2", "🫀 Anatomy"),
+    ("3", "🧪 Biochemistry"),
+    ("4", "🔡 English"),
+    ("5", "🔬 Physiology"),
+    ("6", "🦠 Microbiology"),
+    ("7", "📊 Biostatistics"),
+    ("8", "🧬 Biological"),
+]
+
+INTRO_SUBJECT_ID = "0"
+ALL_SECTIONS = [("0", "📚 القسم التمهيدي")] + list(SUBJECTS)
+
 
 def main_menu_keyboard():
     keyboard = [
@@ -129,6 +179,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("➕ إضافة ملفات", callback_data="admin_add_info")],
         [InlineKeyboardButton("🗑 حذف ملف", callback_data="admin_delete_select")],
         [InlineKeyboardButton("📊 إحصائيات", callback_data="admin_stats")],
+        [InlineKeyboardButton("👥 إدارة المشرفين", callback_data="admin_manage_users")],
         [InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="back_main")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -161,6 +212,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
+    # تنظيف أي حالة إدخال سابقة
+    context.user_data.pop("waiting_for_admin_id", None)
     await update.message.reply_text(
         "🔧 *لوحة المشرف*\n\nمرحباً بك يا مشرف! اختر ما تريد:",
         parse_mode="Markdown",
@@ -173,6 +226,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     user_id = query.from_user.id
+
+    # إلغاء انتظار الـ ID لو ضغط على أي زر آخر
+    if data != "admin_add_new_click":
+        context.user_data.pop("waiting_for_admin_id", None)
 
     if data == "intro":
         files = get_files(INTRO_SUBJECT_ID)
@@ -312,6 +369,70 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
         )
 
+    # --- معالجة أزرار المشرفين الجديدة ---
+    elif data == "admin_manage_users":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        admins = get_all_admins()
+        text = "👥 *إدارة مشرفي البوت*\n\nالمشرفون الحاليون:\n"
+        for idx, adm_id in enumerate(admins, 1):
+            tag = " [المالك الأساسي]" if adm_id == PRIMARY_ADMIN else ""
+            text += f"{idx}. `{adm_id}`{tag}\n"
+        
+        kb = [
+            [InlineKeyboardButton("➕ إضافة مشرف جديد", callback_data="admin_add_new_click")],
+            [InlineKeyboardButton("🗑 حذف مشرف", callback_data="admin_remove_select")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]
+        ]
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data == "admin_add_new_click":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        context.user_data["waiting_for_admin_id"] = True
+        await query.edit_message_text(
+            "📥 *إضافة مشرف جديد*\n\nمن فضلك قم بإرسال الـ **ID** الخاص بالمشرف الجديد كرسالة نصية الآن.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_manage_users")]])
+        )
+
+    elif data == "admin_remove_select":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        admins = get_all_admins()
+        # تصفية القائمة لاستبعاد المشرف الأساسي لكي لا يحذف نفسه بالخطأ
+        sub_admins = [a for a in admins if a != PRIMARY_ADMIN]
+        
+        if not sub_admins:
+            await query.answer("⚠️ لا يوجد مشرفون مضافون لحذفهم.", show_alert=True)
+            return
+            
+        kb = []
+        for adm_id in sub_admins:
+            kb.append([InlineKeyboardButton(f"❌ حذف {adm_id}", callback_data=f"admin_confirm_del_{adm_id}")])
+        kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_manage_users")])
+        
+        await query.edit_message_text(
+            "🗑 *اختر المشرف المراد حذفه من البوت:*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    elif data.startswith("admin_confirm_del_"):
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        target_id = int(data.replace("admin_confirm_del_", ""))
+        remove_admin(target_id)
+        await query.edit_message_text(
+            f"✅ تم إزالة المشرف صاحب الـ ID: `{target_id}` بنجاح.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع لإدارة المشرفين", callback_data="admin_manage_users")]])
+        )
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -342,6 +463,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        return
+
+    # التحقق مما إذا كان المشرف في وضع "انتظار الـ ID" لإضافة مشرف جديد
+    if context.user_data.get("waiting_for_admin_id"):
+        text = update.message.text.strip()
+        if not text.isdigit():
+            await update.message.reply_text("⚠️ خطأ! يرجى إرسال الـ ID كأرقام فقط بدون حروف.")
+            return
+        
+        new_admin_id = int(text)
+        if add_admin(new_admin_id):
+            context.user_data.pop("waiting_for_admin_id", None)
+            await update.message.reply_text(
+                f"✅ تم بنجاح إضافة المشرف الجديد!\n🆔 الـ ID: `{new_admin_id}`\n\nيمكنه الآن استخدام أمر `/admin` للتحكم بالبوت.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ العودة لإدارة المشرفين", callback_data="admin_manage_users")]])
+            )
+        else:
+            await update.message.reply_text("❌ حدث خطأ أثناء الحفظ في قاعدة البيانات.")
 
 
 async def save_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -400,7 +545,10 @@ def main():
             BotCommand("start", "🏠 القائمة الرئيسية"),
             BotCommand("admin", "🔧 لوحة المشرف"),
         ]
-        for admin_id in ADMIN_IDS:
+        
+        # تعيين القائمة للمشرفين المتاحين
+        admins = get_all_admins()
+        for admin_id in admins:
             try:
                 await application.bot.set_my_commands(
                     admin_commands,
@@ -416,8 +564,9 @@ def main():
     app.add_handler(CallbackQueryHandler(save_file_handler, pattern=r"^save_|^cancel_save$"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
-    logger.info("🤖 البوت يعمل مع نظام صلاحيات المشرف...")
+    logger.info("🤖 البوت يعمل مع نظام صلاحيات المشرف التفاعلي...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
