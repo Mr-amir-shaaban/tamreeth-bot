@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# التعديل الجديد: إعداد مسار ذاكرة دائم لا يُمسح أبداً
 DATA_DIR = "/app/data"
-# إذا كان المسار غير موجود (في حال التشغيل المحلي)، نستخدم نفس مسار الملف
 if not os.path.exists(DATA_DIR):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -213,7 +211,7 @@ def subjects_keyboard():
 
 def admin_panel_keyboard():
     keyboard = [
-        [InlineKeyboardButton("➕ إضافة ملف، صورة أو رابط", callback_data="admin_add_info")],
+        [InlineKeyboardButton("➕ إضافة محتوى (ملف/تسجيل/رابط/الخ)", callback_data="admin_add_info")],
         [InlineKeyboardButton("📝 إدارة وتعديل المحتوى", callback_data="admin_edit_files_select")],
         [InlineKeyboardButton("🗑 حذف محتوى", callback_data="admin_delete_select")],
         [InlineKeyboardButton("📊 إحصائيات", callback_data="admin_stats")],
@@ -238,6 +236,7 @@ async def send_stored_file(context, chat_id, file_id, file_name=None):
         name_part = f"🔗 *{file_name}*\n" if file_name and file_name != "رابط مفيد" else "🔗 "
         await context.bot.send_message(chat_id=chat_id, text=f"{name_part}{file_id}", parse_mode="Markdown")
     else:
+        # تجربة إرسال المحتوى حسب نوعه
         try:
             await context.bot.send_document(chat_id=chat_id, document=file_id)
         except Exception:
@@ -246,8 +245,14 @@ async def send_stored_file(context, chat_id, file_id, file_name=None):
             except Exception:
                 try:
                     await context.bot.send_video(chat_id=chat_id, video=file_id)
-                except Exception as e:
-                    logger.error(f"Error sending file/media: {e}")
+                except Exception:
+                    try:
+                        await context.bot.send_audio(chat_id=chat_id, audio=file_id)
+                    except Exception:
+                        try:
+                            await context.bot.send_voice(chat_id=chat_id, voice=file_id)
+                        except Exception as e:
+                            logger.error(f"Error sending file/media: {e}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -327,7 +332,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "admin_add_info":
         if not is_admin(user_id): return
-        await query.edit_message_text("➕ *إضافة محتوى*\n\nأرسل للمحادثة أي (ملف، صورة، فيديو، أو رابط يبدأ بـ http) وسيطلب منك البوت تحديد قسمه فوراً.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]]))
+        await query.edit_message_text("➕ *إضافة محتوى*\n\nأرسل للمحادثة أي (ملف، صورة، فيديو، تسجيل صوتي أو رابط) وسيطلب منك البوت تحديد قسمه فوراً.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]]))
 
     elif data == "admin_stats":
         if not is_admin(user_id): return
@@ -470,6 +475,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = update.message
+    
+    # التقاط جميع أنواع الملفات والميديا
     if msg.document:
         file_id = msg.document.file_id
         file_name = msg.document.file_name or "ملف_بدون_اسم"
@@ -479,6 +486,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg.video:
         file_id = msg.video.file_id
         file_name = msg.video.file_name or f"فيديو_{file_id[-6:]}.mp4"
+    elif msg.audio: # المقاطع الصوتية (الأغاني/المحاضرات المسجلة)
+        file_id = msg.audio.file_id
+        file_name = msg.audio.file_name or f"مقطع_صوتي_{file_id[-6:]}.mp3"
+    elif msg.voice: # التسجيلات الصوتية السريعة في تليجرام (Voice Notes)
+        file_id = msg.voice.file_id
+        file_name = f"تسجيل_صوتي_{file_id[-6:]}.ogg"
     else:
         return
 
@@ -496,7 +509,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel_save")])
 
-    await update.message.reply_text(f"📎 استلمت الميديا/الملف: *{file_name}*\n\nاختر القسم لحفظه فيه:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"📎 استلمت المحتوى: *{file_name}*\n\nاختر القسم لحفظه فيه:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def save_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,7 +583,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                         if not new_name.lower().endswith(ext.lower()):
                             new_name += ext
 
-                        processing_msg = await update.message.reply_text("⏳ جاري سحب الملف وإعادة تسميته ورفعه...")
+                        processing_msg = await update.message.reply_text("⏳ جاري سحب المحتوى وإعادة تسميته ورفعه...")
 
                         try:
                             tg_file = await context.bot.get_file(old_file_id)
@@ -593,7 +606,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                             logger.error(f"خطأ في تغيير الاسم: {e}")
                             await processing_msg.edit_text(
                                 "⚠️ عذراً، لم أتمكن من إعادة رفع الملف بسبب كبر حجمه.\n"
-                                "قم بتعديل اسمه من جهازك وارفعه كملف جديد.",
+                                "قم بتعديل اسمه من جهازك وارفعه من جديد.",
                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="admin_panel")]])
                             )
             context.user_data.clear()
@@ -620,7 +633,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard.append([InlineKeyboardButton(f"📄 {file_name}", callback_data=f"send_file_{row_id}")])
     keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back_main")])
     
-    await update.message.reply_text(f"🔍 *نتائج البحث عن:* \"{text}\"\n\nاضغط للتحميل:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"🔍 *نتائج البحث عن:* \"{text}\"\n\nاضغط للتشغيل أو التحميل:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 def main():
@@ -644,7 +657,10 @@ def main():
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(save_file_handler, pattern=r"^save_|^cancel_save$"))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_media))
+    
+    # الفلتر الجديد الشامل للصور، الملفات، الفيديوهات، التسجيلات، والمقاطع الصوتية
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE, handle_media))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
