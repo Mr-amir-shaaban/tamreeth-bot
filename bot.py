@@ -1,196 +1,425 @@
 import os
+import logging
 import sqlite3
-import telebot
-from telebot import types
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, MessageHandler, filters
+)
 
-# 1. إعداد البوت والمعلومات الأساسية
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # سيقرأ التوكن تلقائياً من المتغيرات البيئية في Railway
-ADMIN_ID = 123456789  # ⚠️ ضع هنا الـ ID الخاص بحسابك على تليجرام لتفعيل صلاحيات الأدمن
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+DB_PATH = os.path.join(os.path.dirname(__file__), "files.db")
 
-# 2. إعداد قاعدة البيانات وحفظ المواد
-conn = sqlite3.connect('bot_database.db', check_same_thread=False)
-cursor = conn.cursor()
+ADMIN_IDS = {7351394218}
 
-# إنشاء جدول المجلدات/المواد إذا لم يكن موجوداً
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS folders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        term INTEGER,
-        name TEXT
+SUBJECTS = [
+    ("1", "💊 Medical Terminology"),
+    ("2", "🫀 Anatomy"),
+    ("3", "🧪 Biochemistry"),
+    ("4", "🔡 English"),
+    ("5", "🔬 Physiology"),
+    ("6", "🦠 Microbiology"),
+    ("7", "📊 Biostatistics"),
+    ("8", "🧬 Biological"),
+]
+
+INTRO_SUBJECT_ID = "0"
+ALL_SECTIONS = [("0", "📚 القسم التمهيدي")] + list(SUBJECTS)
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_id TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            file_name TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+    logger.info("✅ قاعدة البيانات جاهزة")
+
+
+def get_files(subject_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT file_id, file_name FROM files WHERE subject_id = ? ORDER BY added_at", (subject_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def save_file(subject_id: str, file_id: str, file_name: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO files (subject_id, file_id, file_name) VALUES (?, ?, ?)",
+        (subject_id, file_id, file_name)
     )
-''')
-conn.commit()
-
-# دمج مواد الترم الأول تلقائياً عند أول تشغيل للبوت إذا كانت فارغة
-cursor.execute("SELECT COUNT(*) FROM folders WHERE term = 1")
-if cursor.fetchone()[0] == 0:
-    default_term1_subjects = ["تشريح (Anatomy)", "وظائف أعضاء (Physiology)", "أساسيات التمريض", "المصطلحات الطبية"]
-    for subject in default_term1_subjects:
-        cursor.execute("INSERT INTO folders (term, name) VALUES (?, ?)", (1, subject))
     conn.commit()
+    conn.close()
 
 
-# 3. القوائم ولوحات الأزرار (Keyboards)
-
-def main_menu_keyboard(user_id):
-    """القائمة الرئيسية للمستخدمين والأدمن"""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton("الترم الأول")
-    btn2 = types.KeyboardButton("الترم الثاني")
-    btn3 = types.KeyboardButton("الترم الثالث")
-    btn4 = types.KeyboardButton("الترم الرابع")
-    btn5 = types.KeyboardButton("الترم الخامس")
-    btn6 = types.KeyboardButton("الترم السادس")
-    
-    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
-    
-    # إظهار لوحة التحكم للمشرف فقط
-    if user_id == ADMIN_ID:
-        admin_btn = types.KeyboardButton("⚙️ لوحة المشرف")
-        markup.add(admin_btn)
-    return markup
-
-def admin_keyboard():
-    """لوحة تحكم الأدمن الخاصة بالإدارة"""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    add_btn = types.KeyboardButton("➕ إضافة مجلد (مادة)")
-    del_btn = types.KeyboardButton("❌ حذف مجلد (مادة)")
-    back_btn = types.KeyboardButton("🔙 العودة للقائمة الرئيسية")
-    markup.add(add_btn, del_btn, back_btn)
-    return markup
-
-def terms_inline_keyboard(action_type):
-    """قائمة اختيار الترم للأدمن لإضافة أو حذف المواد منها"""
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    # تتيح للأدمن التحكم بالترمات (من الترم 1 إلى الترم 6)
-    buttons = [types.InlineKeyboardButton(f"الترم {i}", callback_data=f"{action_type}_{i}") for i in range(1, 7)]
-    markup.add(*buttons)
-    return markup
+def count_files(subject_id: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM files WHERE subject_id = ?", (subject_id,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 
-# 4. معالجة الأوامر والرسائل النصية
-
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    welcome_text = "🎯 *أهلاً بك في بوت المواد الدراسية التمريضية.*\n\nالرجاء اختيار الترم من الأزرار بالأسفل لعرض المواد المتاحة:"
-    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard(message.from_user.id), parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: True)
-def handle_text_messages(message):
-    user_id = message.from_user.id
-    text = message.text
-
-    # خريطة تحويل النصوص إلى أرقام الترمات المقابلة لها
-    term_mapping = {
-        "الترم الأول": 1, "الترم الثاني": 2, "الترم الثالث": 3,
-        "الترم الرابع": 4, "الترم الخامس": 5, "الترم السادس": 6
-    }
-    
-    if text in term_mapping:
-        term_num = term_mapping[text]
-        cursor.execute("SELECT name FROM folders WHERE term = ?", (term_num,))
-        subjects = cursor.fetchall()
-        
-        if subjects:
-            response = f"📚 *المواد المتاحة في {text}:*\n\n"
-            for sub in subjects:
-                response += f"📁 {sub[0]}\n"
-            bot.send_message(message.chat.id, response, parse_mode="Markdown")
-        else:
-            bot.send_message(message.chat.id, f"ℹ️ لا توجد مواد مضافة في {text} حالياً.")
-
-    # الدخول إلى لوحة المشرف للأدمن فقط
-    elif text == "⚙️ لوحة المشرف" and user_id == ADMIN_ID:
-        bot.send_message(message.chat.id, "🎯 مرحباً بك في لوحة التحكم الخاصة بالمشرف. اختر الإجراء المطلوب:", reply_markup=admin_keyboard())
-
-    # العودة للقائمة الرئيسية
-    elif text == "🔙 العودة للقائمة الرئيسية":
-        bot.send_message(message.chat.id, "تمت العودة للقائمة الرئيسية بنجاح.", reply_markup=main_menu_keyboard(user_id))
-
-    # طلب إضافة مادة جديدة
-    elif text == "➕ إضافة مجلد (مادة)" and user_id == ADMIN_ID:
-        bot.send_message(message.chat.id, "اختر الترم الذي تريد إضافة المجلد إليه:", reply_markup=terms_inline_keyboard("add"))
-
-    # طلب حذف مادة
-    elif text == "❌ حذف مجلد (مادة)" and user_id == ADMIN_ID:
-        bot.send_message(message.chat.id, "اختر الترم الذي تريد حذف المجلد منه:", reply_markup=terms_inline_keyboard("del"))
+def get_all_files_with_ids(subject_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, file_id, file_name FROM files WHERE subject_id = ? ORDER BY added_at", (subject_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 
-# 5. معالجة أزرار الـ Inline (الضغط على الترمات والقوائم الفرعية)
+def delete_file_by_id(row_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM files WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    user_id = call.from_user.id
-    if user_id != ADMIN_ID:
+
+def main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📚 القسم التمهيدي", callback_data="intro")],
+        [InlineKeyboardButton("📖 المواد الدراسية", callback_data="subjects")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def subjects_keyboard():
+    keyboard = []
+    for sid, name in SUBJECTS:
+        count = count_files(sid)
+        label = f"{name}  ({count})" if count > 0 else name
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"subject_{sid}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_main")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def back_keyboard(back_target="subjects"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"back_{back_target}")]
+    ])
+
+
+def admin_panel_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة ملفات", callback_data="admin_add_info")],
+        [InlineKeyboardButton("🗑 حذف ملف", callback_data="admin_delete_select")],
+        [InlineKeyboardButton("📊 إحصائيات", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="back_main")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def admin_delete_sections_keyboard():
+    keyboard = []
+    for sid, name in ALL_SECTIONS:
+        count = count_files(sid)
+        label = f"{name} ({count})"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"admin_del_section_{sid}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = (
+        f"👋 أهلاً {user.first_name}!\n\n"
+        "🎓 *تمريض مكثف - مايو 2026*\n\n"
+        "مرحباً بك في بوت المواد الدراسية.\n"
+        "اختر من القائمة أدناه:"
+    )
+    kb = main_menu_keyboard()
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
+    await update.message.reply_text(
+        "🔧 *لوحة المشرف*\n\nمرحباً بك يا مشرف! اختر ما تريد:",
+        parse_mode="Markdown",
+        reply_markup=admin_panel_keyboard()
+    )
 
-    data = call.data.split('_')
-    action = data[0]
 
-    # حالة: طلب إضافة مادة لترم معين
-    if action == "add":
-        term_num = int(data[1])
-        msg = bot.edit_message_text(f"✍️ أرسل الآن اسم المجلد (المادة) الجديد لإضافته إلى *الترم {term_num}*:", 
-                                    call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-        bot.register_next_step_handler(msg, save_new_folder, term_num)
-        
-    # حالة: عرض قائمة المواد المتوفرة في الترم المختار لحذفها
-    elif action == "del":
-        term_num = int(data[1])
-        cursor.execute("SELECT id, name FROM folders WHERE term = ?", (term_num,))
-        subjects = cursor.fetchall()
-        
-        if not subjects:
-            bot.edit_message_text(f"ℹ️ لا توجد مواد في الترم {term_num} لحذفها حالياً.", call.message.chat.id, call.message.message_id)
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "intro":
+        files = get_files(INTRO_SUBJECT_ID)
+        if files:
+            text = f"📚 *القسم التمهيدي*\n\n📂 يحتوي على {len(files)} ملف — يتم الإرسال..."
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard("main"))
+            for file_id, file_name in files:
+                try:
+                    await context.bot.send_document(chat_id=query.message.chat_id, document=file_id)
+                except Exception as e:
+                    logger.error(f"خطأ في إرسال الملف: {e}")
+        else:
+            text = "📚 *القسم التمهيدي*\n\n⚠️ لم يتم رفع ملفات القسم التمهيدي بعد."
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard("main"))
+
+    elif data == "subjects":
+        await query.edit_message_text(
+            "📖 *المواد الدراسية*\n\nاختر المادة:",
+            parse_mode="Markdown",
+            reply_markup=subjects_keyboard()
+        )
+
+    elif data.startswith("subject_"):
+        sid = data.split("_")[1]
+        subject_name = next((name for s_id, name in SUBJECTS if s_id == sid), "غير معروف")
+        files = get_files(sid)
+        if files:
+            text = f"📂 *{subject_name}*\n\n📎 يحتوي على {len(files)} ملف — يتم الإرسال..."
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard("subjects"))
+            for file_id, file_name in files:
+                try:
+                    await context.bot.send_document(chat_id=query.message.chat_id, document=file_id)
+                except Exception as e:
+                    logger.error(f"خطأ في إرسال الملف {file_name}: {e}")
+        else:
+            text = f"📂 *{subject_name}*\n\n⚠️ لا توجد ملفات في هذه المادة بعد."
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard("subjects"))
+
+    elif data == "back_main":
+        await query.edit_message_text(
+            "🎓 *تمريض مكثف - مايو 2026*\n\nاختر من القائمة:",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()
+        )
+
+    elif data == "back_subjects":
+        await query.edit_message_text(
+            "📖 *المواد الدراسية*\n\nاختر المادة:",
+            parse_mode="Markdown",
+            reply_markup=subjects_keyboard()
+        )
+
+    elif data == "admin_panel":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
-            
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for sub_id, sub_name in subjects:
-            markup.add(types.InlineKeyboardButton(f"🗑️ {sub_name}", callback_data=f"confirm_{sub_id}"))
-        
-        bot.edit_message_text(f"🗑️ اختر المادة التي تريد حذفها نهائياً من الترم {term_num}:", 
-                                call.message.chat.id, call.message.message_id, reply_markup=markup)
+        await query.edit_message_text(
+            "🔧 *لوحة المشرف*\n\nاختر ما تريد:",
+            parse_mode="Markdown",
+            reply_markup=admin_panel_keyboard()
+        )
 
-    # حالة: تأكيد الحذف الفعلي من قاعدة البيانات باستخدام الـ ID الخاص بالمادة
-    elif action == "confirm":
-        sub_id = int(data[1])
-        
-        # جلب اسم المادة والترم قبل الحذف لإظهارهما في رسالة النجاح
-        cursor.execute("SELECT name, term FROM folders WHERE id = ?", (sub_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            sub_name, term_num = result[0], result[1]
-            cursor.execute("DELETE FROM folders WHERE id = ?", (sub_id,))
-            conn.commit()
-            bot.edit_message_text(f"✅ تم حذف المجلد *({sub_name})* من الترم {term_num} بنجاح وتحديث القوائم.", 
-                                  call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-        else:
-            bot.edit_message_text("❌ حدث خطأ، المادة غير موجودة أو تم حذفها مسبقاً.", call.message.chat.id, call.message.message_id)
+    elif data == "admin_add_info":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "➕ *إضافة ملفات*\n\n"
+            "ببساطة أرسل أي ملف لهذه المحادثة وسيُطلب منك تحديد القسم أو المادة.\n\n"
+            "يمكنك إرسال عدة ملفات تباعاً.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
+        )
+
+    elif data == "admin_stats":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        lines = ["📊 *إحصائيات الملفات*\n"]
+        total = 0
+        for sid, name in ALL_SECTIONS:
+            c = count_files(sid)
+            total += c
+            lines.append(f"• {name}: {c} ملف")
+        lines.append(f"\n📦 الإجمالي: {total} ملف")
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
+        )
+
+    elif data == "admin_delete_select":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "🗑 *حذف ملف*\n\nاختر القسم أو المادة:",
+            parse_mode="Markdown",
+            reply_markup=admin_delete_sections_keyboard()
+        )
+
+    elif data.startswith("admin_del_section_"):
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        sid = data.replace("admin_del_section_", "")
+        section_name = next((name for s_id, name in ALL_SECTIONS if s_id == sid), "غير معروف")
+        files = get_all_files_with_ids(sid)
+        if not files:
+            await query.answer("لا توجد ملفات في هذا القسم.", show_alert=True)
+            return
+        keyboard = []
+        for row_id, file_id, file_name in files:
+            label = f"🗑 {file_name or 'ملف'}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"admin_del_file_{row_id}_{sid}")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_delete_select")])
+        await query.edit_message_text(
+            f"🗑 *حذف من: {section_name}*\n\nاختر الملف للحذف:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("admin_del_file_"):
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        parts = data.replace("admin_del_file_", "").split("_", 1)
+        row_id = int(parts[0])
+        sid = parts[1]
+        delete_file_by_id(row_id)
+        section_name = next((name for s_id, name in ALL_SECTIONS if s_id == sid), "غير معروف")
+        remaining = count_files(sid)
+        await query.edit_message_text(
+            f"✅ تم حذف الملف من *{section_name}*.\n"
+            f"📊 الملفات المتبقية: {remaining}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
+        )
 
 
-# 6. وظائف استقبال المدخلات النصية (Next Step Handlers)
-
-def save_new_folder(message, term_num):
-    """تلقي اسم المادة الجديدة من الأدمن وحفظها في قاعدة البيانات"""
-    folder_name = message.text.strip()
-    
-    # الحماية من إدخال نصوص فارغة أو أوامر تخريبية أثناء خطوة التسجيل
-    if folder_name == "" or folder_name.startswith('/') or folder_name == "🔙 العودة للقائمة الرئيسية":
-        bot.send_message(message.chat.id, "❌ عملية إلغاء أو اسم مادة غير صالحة. تم التراجع عن الإضافة.", reply_markup=admin_keyboard())
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ عذراً، رفع الملفات متاح للمشرف فقط.")
         return
 
-    # إدخال المادة الجديدة وحفظ التغييرات
-    cursor.execute("INSERT INTO folders (term, name) VALUES (?, ?)", (term_num, folder_name))
-    conn.commit()
-    
-    bot.send_message(message.chat.id, f"✅ تم بنجاح إضافة مجلد المادة: *{folder_name}* إلى الترم {term_num}.", 
-                     reply_markup=admin_keyboard(), parse_mode="Markdown")
+    doc = update.message.document
+    if not doc:
+        return
+
+    context.user_data["pending_file_id"] = doc.file_id
+    context.user_data["pending_file_name"] = doc.file_name or "ملف"
+
+    keyboard = []
+    row = []
+    for sid, name in ALL_SECTIONS:
+        row.append(InlineKeyboardButton(name, callback_data=f"save_{sid}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel_save")])
+
+    await update.message.reply_text(
+        f"📎 استلمت الملف: *{doc.file_name}*\n\nاختر القسم أو المادة لإضافته إليها:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-# تشغيل واستمرار استقبال البيانات للبوت دون توقف
-if __name__ == '__main__':
-    print("🚀 البوت المطور يعمل الآن بكفاءة عالية...")
-    bot.infinity_polling()
+async def save_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "cancel_save":
+        context.user_data.pop("pending_file_id", None)
+        context.user_data.pop("pending_file_name", None)
+        await query.edit_message_text("❌ تم إلغاء العملية.")
+        return
+
+    if data.startswith("save_"):
+        sid = data.split("_", 1)[1]
+        section_name = next((name for s_id, name in ALL_SECTIONS if s_id == sid), "غير معروف")
+
+        file_id = context.user_data.get("pending_file_id")
+        file_name = context.user_data.get("pending_file_name", "ملف")
+
+        if not file_id:
+            await query.edit_message_text("⚠️ انتهت صلاحية الملف، أرسله مجدداً.")
+            return
+
+        save_file(sid, file_id, file_name)
+        context.user_data.pop("pending_file_id", None)
+        context.user_data.pop("pending_file_name", None)
+        total = count_files(sid)
+
+        await query.edit_message_text(
+            f"✅ تم حفظ *{file_name}* في *{section_name}* بنجاح!\n"
+            f"📊 إجمالي الملفات في هذا القسم: {total}",
+            parse_mode="Markdown"
+        )
+
+
+def main():
+    if not TOKEN:
+        logger.error("لم يتم العثور على TELEGRAM_BOT_TOKEN!")
+        return
+
+    init_db()
+
+    async def post_init(application: Application):
+        from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
+
+        public_commands = [
+            BotCommand("start", "🏠 القائمة الرئيسية"),
+        ]
+        await application.bot.set_my_commands(
+            public_commands,
+            scope=BotCommandScopeAllPrivateChats()
+        )
+
+        admin_commands = [
+            BotCommand("start", "🏠 القائمة الرئيسية"),
+            BotCommand("admin", "🔧 لوحة المشرف"),
+        ]
+        for admin_id in ADMIN_IDS:
+            try:
+                await application.bot.set_my_commands(
+                    admin_commands,
+                    scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+            except Exception as e:
+                logger.warning(f"لم يتم تعيين أوامر المشرف للمستخدم {admin_id}: {e}")
+
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CallbackQueryHandler(save_file_handler, pattern=r"^save_|^cancel_save$"))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    logger.info("🤖 البوت يعمل مع نظام صلاحيات المشرف...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
