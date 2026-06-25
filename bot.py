@@ -4,7 +4,7 @@ import telebot
 from telebot import types
 
 # 1. إعداد البوت والمعلومات الأساسية
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # يقرأ التوكن من متغيرات Railway البيئية
+BOT_TOKEN = '8971793137:AAFdVTg5m6hySdc0fv3XPQWtuXT7NPRXps4' # يقرأ التوكن من متغيرات Railway البيئية
 ADMIN_ID = 123456789  # ⚠️ استبدل هذا الرقم بـ ID حسابك الخاص على تليجرام
 
 bot = telebot.TeleBot(BOT_TOKEN)
