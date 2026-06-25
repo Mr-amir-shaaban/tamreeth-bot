@@ -4,19 +4,23 @@ import telebot
 from telebot import types
 
 # 1. إعداد البوت والمعلومات الأساسية
-BOT_TOKEN = '8971793137:AAFdVTg5m6hySdc0fv3XPQWtuXT7NPRXps4' # يقرأ التوكن من متغيرات Railway البيئية
-ADMIN_ID = 123456789  # ⚠️ استبدل هذا الرقم بـ ID حسابك الخاص على تليجرام
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # سيقرأ التوكن تلقائياً من المتغيرات البيئية في Railway
+ADMIN_ID = 123456789  # ⚠️ ضع هنا الـ ID الخاص بحسابك على تليجرام لتفعيل صلاحيات الأدمن
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# 2. إعداد قاعدة البيانات المتقدمة
+# 2. إعداد قاعدة البيانات وحفظ المواد
 conn = sqlite3.connect('bot_database.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# إنشاء الجداول الأساسية
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS folders (id INTEGER PRIMARY KEY AUTOINCREMENT, term INTEGER, name TEXT)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, folder_id INTEGER, name TEXT, file_id TEXT, file_type TEXT)''')
+# إنشاء جدول المجلدات/المواد إذا لم يكن موجوداً
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS folders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        term INTEGER,
+        name TEXT
+    )
+''')
 conn.commit()
 
 # دمج مواد الترم الأول تلقائياً عند أول تشغيل للبوت إذا كانت فارغة
@@ -28,225 +32,165 @@ if cursor.fetchone()[0] == 0:
     conn.commit()
 
 
-# 3. لوحات التحكم والأزرار (Keyboards)
+# 3. القوائم ولوحات الأزرار (Keyboards)
 
 def main_menu_keyboard(user_id):
+    """القائمة الرئيسية للمستخدمين والأدمن"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    buttons = [types.KeyboardButton(f"الترم {i}") for i in ["الأول", "الثاني", "الثالث", "الرابع", "الخامس", "السادس"]]
-    markup.add(*buttons)
+    btn1 = types.KeyboardButton("الترم الأول")
+    btn2 = types.KeyboardButton("الترم الثاني")
+    btn3 = types.KeyboardButton("الترم الثالث")
+    btn4 = types.KeyboardButton("الترم الرابع")
+    btn5 = types.KeyboardButton("الترم الخامس")
+    btn6 = types.KeyboardButton("الترم السادس")
+    
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    
+    # إظهار لوحة التحكم للمشرف فقط
     if user_id == ADMIN_ID:
-        markup.add(types.KeyboardButton("⚙️ لوحة المشرف"))
+        admin_btn = types.KeyboardButton("⚙️ لوحة المشرف")
+        markup.add(admin_btn)
     return markup
 
 def admin_keyboard():
+    """لوحة تحكم الأدمن الخاصة بالإدارة"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton("➕ إضافة مادة"), 
-        types.KeyboardButton("❌ حذف مادة"),
-        types.KeyboardButton("📤 إضافة ملف/محاضرة"),
-        types.KeyboardButton("📢 إذاعة إعلان للطلاب"),
-        types.KeyboardButton("📊 إحصائيات الطلاب"),
-        types.KeyboardButton("🔙 العودة للقائمة الرئيسية")
-    )
+    add_btn = types.KeyboardButton("➕ إضافة مجلد (مادة)")
+    del_btn = types.KeyboardButton("❌ حذف مجلد (مادة)")
+    back_btn = types.KeyboardButton("🔙 العودة للقائمة الرئيسية")
+    markup.add(add_btn, del_btn, back_btn)
     return markup
 
 def terms_inline_keyboard(action_type):
+    """قائمة اختيار الترم للأدمن لإضافة أو حذف المواد منها"""
     markup = types.InlineKeyboardMarkup(row_width=2)
+    # تتيح للأدمن التحكم بالترمات (من الترم 1 إلى الترم 6)
     buttons = [types.InlineKeyboardButton(f"الترم {i}", callback_data=f"{action_type}_{i}") for i in range(1, 7)]
     markup.add(*buttons)
     return markup
 
 
-# 4. معالجة الأوامر والرسائل النصية للطلاب
+# 4. معالجة الأوامر والرسائل النصية
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    user_id = message.from_user.id
-    # حفظ المستخدم في قاعدة البيانات للإحصائيات والتعميم
-    try:
-        cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-        conn.commit()
-    except Exception as e:
-        print(f"Error saving user: {e}")
-
-    welcome_text = "🎯 *أهلاً بك في بوت المواد الدراسية التمريضية.*\n\nالرجاء اختيار الترم لعرض المواد والمحاضرات المتوفرة:"
-    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard(user_id), parse_mode="Markdown")
+    welcome_text = "🎯 *أهلاً بك في بوت المواد الدراسية التمريضية.*\n\nالرجاء اختيار الترم من الأزرار بالأسفل لعرض المواد المتاحة:"
+    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard(message.from_user.id), parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def handle_text_messages(message):
     user_id = message.from_user.id
     text = message.text
 
-    term_mapping = {"الترم الأول": 1, "الترم الثاني": 2, "الترم الثالث": 3, "الترم الرابع": 4, "الترم الخامس": 5, "الترم السادس": 6}
+    # خريطة تحويل النصوص إلى أرقام الترمات المقابلة لها
+    term_mapping = {
+        "الترم الأول": 1, "الترم الثاني": 2, "الترم الثالث": 3,
+        "الترم الرابع": 4, "الترم الخامس": 5, "الترم السادس": 6
+    }
     
     if text in term_mapping:
         term_num = term_mapping[text]
-        cursor.execute("SELECT id, name FROM folders WHERE term = ?", (term_num,))
+        cursor.execute("SELECT name FROM folders WHERE term = ?", (term_num,))
         subjects = cursor.fetchall()
         
         if subjects:
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for sub_id, sub_name in subjects:
-                markup.add(types.InlineKeyboardButton(f"📁 {sub_name}", callback_data=f"viewfolder_{sub_id}"))
-            bot.send_message(message.chat.id, f"📚 *اختر المادة من {text} لتصفح ملفاتها:*", reply_markup=markup, parse_mode="Markdown")
+            response = f"📚 *المواد المتاحة في {text}:*\n\n"
+            for sub in subjects:
+                response += f"📁 {sub[0]}\n"
+            bot.send_message(message.chat.id, response, parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, f"ℹ️ لا توجد مواد مضافة في {text} حالياً.")
 
-    # أقسام لوحة تحكم الأدمن
-    elif user_id == ADMIN_ID:
-        if text == "⚙️ لوحة المشرف":
-            bot.send_message(message.chat.id, "🎯 مرحباً بك في لوحة الإدارة المتقدمة:", reply_markup=admin_keyboard())
-        elif text == "🔙 العودة للقائمة الرئيسية":
-            bot.send_message(message.chat.id, "تمت العودة بنجاح.", reply_markup=main_menu_keyboard(user_id))
-        elif text == "➕ إضافة مادة":
-            bot.send_message(message.chat.id, "اختر الترم المُراد إضافة المادة إليه:", reply_markup=terms_inline_keyboard("add"))
-        elif text == "❌ حذف مادة":
-            bot.send_message(message.chat.id, "اختر الترم المراد حذف المادة منه:", reply_markup=terms_inline_keyboard("del"))
-        elif text == "📤 إضافة ملف/محاضرة":
-            bot.send_message(message.chat.id, "اختر الترم الذي تقع فيه المادة المستهدفة:", reply_markup=terms_inline_keyboard("addfile"))
-        elif text == "📊 إحصائيات الطلاب":
-            cursor.execute("SELECT COUNT(*) FROM users")
-            count = cursor.fetchone()[0]
-            bot.send_message(message.chat.id, f"📊 *عدد الطلاب المشتركين في البوت حالياً:* `{count}` طالب.", parse_mode="Markdown")
-        elif text == "📢 إذاعة إعلان للطلاب":
-            msg = bot.send_message(message.chat.id, "✍️ أرسل الآن نص الإعلان أو الرسالة التي تريد إرسالها لجميع الطلاب:")
-            bot.register_next_step_handler(msg, broadcast_to_all)
+    # الدخول إلى لوحة المشرف للأدمن فقط
+    elif text == "⚙️ لوحة المشرف" and user_id == ADMIN_ID:
+        bot.send_message(message.chat.id, "🎯 مرحباً بك في لوحة التحكم الخاصة بالمشرف. اختر الإجراء المطلوب:", reply_markup=admin_keyboard())
+
+    # العودة للقائمة الرئيسية
+    elif text == "🔙 العودة للقائمة الرئيسية":
+        bot.send_message(message.chat.id, "تمت العودة للقائمة الرئيسية بنجاح.", reply_markup=main_menu_keyboard(user_id))
+
+    # طلب إضافة مادة جديدة
+    elif text == "➕ إضافة مجلد (مادة)" and user_id == ADMIN_ID:
+        bot.send_message(message.chat.id, "اختر الترم الذي تريد إضافة المجلد إليه:", reply_markup=terms_inline_keyboard("add"))
+
+    # طلب حذف مادة
+    elif text == "❌ حذف مجلد (مادة)" and user_id == ADMIN_ID:
+        bot.send_message(message.chat.id, "اختر الترم الذي تريد حذف المجلد منه:", reply_markup=terms_inline_keyboard("del"))
 
 
-# 5. معالجة أزرار التفاعل الـ Inline (Callbacks)
+# 5. معالجة أزرار الـ Inline (الضغط على الترمات والقوائم الفرعية)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     user_id = call.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
     data = call.data.split('_')
     action = data[0]
 
-    # --- قسم تصفح الطلاب للملفات ---
-    if action == "viewfolder":
-        folder_id = int(data[1])
-        cursor.execute("SELECT name, file_id, file_type FROM files WHERE folder_id = ?", (folder_id,))
-        all_files = cursor.fetchall()
+    # حالة: طلب إضافة مادة لترم معين
+    if action == "add":
+        term_num = int(data[1])
+        msg = bot.edit_message_text(f"✍️ أرسل الآن اسم المجلد (المادة) الجديد لإضافته إلى *الترم {term_num}*:", 
+                                    call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        bot.register_next_step_handler(msg, save_new_folder, term_num)
         
-        if not all_files:
-            bot.answer_callback_query(call.id, "ℹ️ هذا المجلد فارغ لا يحتوي على ملفات حالياً.", show_alert=True)
+    # حالة: عرض قائمة المواد المتوفرة في الترم المختار لحذفها
+    elif action == "del":
+        term_num = int(data[1])
+        cursor.execute("SELECT id, name FROM folders WHERE term = ?", (term_num,))
+        subjects = cursor.fetchall()
+        
+        if not subjects:
+            bot.edit_message_text(f"ℹ️ لا توجد مواد في الترم {term_num} لحذفها حالياً.", call.message.chat.id, call.message.message_id)
             return
-        
-        bot.answer_callback_query(call.id, "جاري تحميل الملفات...")
-        for name, f_id, f_type in all_files:
-            if f_type == "text":
-                bot.send_message(call.message.chat.id, f"🔗 *{name}*", parse_mode="Markdown")
-            elif f_type == "document":
-                bot.send_document(call.message.chat.id, f_id, caption=f"📄 {name}")
-            elif f_type == "photo":
-                bot.send_photo(call.message.chat.id, f_id, caption=f"🖼️ {name}")
-            elif f_type == "audio":
-                bot.send_audio(call.message.chat.id, f_id, caption=f"🎵 {name}")
-
-    # --- صلاحيات المشرف فقط ---
-    elif user_id == ADMIN_ID:
-        term_num = int(data[1]) if len(data) > 1 and data[1].isdigit() else None
-
-        if action == "add":
-            msg = bot.edit_message_text(f"✍️ أرسل اسم المادة الجديد لإضافته إلى *الترم {term_num}*:", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-            bot.register_next_step_handler(msg, save_new_folder, term_num)
             
-        elif action == "del":
-            cursor.execute("SELECT id, name FROM folders WHERE term = ?", (term_num,))
-            subjects = cursor.fetchall()
-            if not subjects:
-                bot.edit_message_text(f"ℹ️ لا توجد مواد في الترم {term_num} لحذفها.", call.message.chat.id, call.message.message_id)
-                return
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for sub_id, sub_name in subjects:
-                markup.add(types.InlineKeyboardButton(f"🗑️ {sub_name}", callback_data=f"confirmdel_{sub_id}"))
-            bot.edit_message_text(f"🗑️ اختر المادة المراد حذفها نهائياً:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for sub_id, sub_name in subjects:
+            markup.add(types.InlineKeyboardButton(f"🗑️ {sub_name}", callback_data=f"confirm_{sub_id}"))
+        
+        bot.edit_message_text(f"🗑️ اختر المادة التي تريد حذفها نهائياً من الترم {term_num}:", 
+                                call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-        elif action == "confirmdel":
-            sub_id = int(data[1])
+    # حالة: تأكيد الحذف الفعلي من قاعدة البيانات باستخدام الـ ID الخاص بالمادة
+    elif action == "confirm":
+        sub_id = int(data[1])
+        
+        # جلب اسم المادة والترم قبل الحذف لإظهارهما في رسالة النجاح
+        cursor.execute("SELECT name, term FROM folders WHERE id = ?", (sub_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            sub_name, term_num = result[0], result[1]
             cursor.execute("DELETE FROM folders WHERE id = ?", (sub_id,))
-            cursor.execute("DELETE FROM files WHERE folder_id = ?", (sub_id,)) # حذف ملفات المادة أيضاً حماية للمساحة
             conn.commit()
-            bot.edit_message_text("✅ تم حذف المادة وجميع محتوياتها بنجاح.", call.message.chat.id, call.message.message_id)
-
-        elif action == "addfile":
-            cursor.execute("SELECT id, name FROM folders WHERE term = ?", (term_num,))
-            subjects = cursor.fetchall()
-            if not subjects:
-                bot.edit_message_text(f"⚠️ لا توجد مواد في هذا الترم، قم بإضافة مادة أولاً.", call.message.chat.id, call.message.message_id)
-                return
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for sub_id, sub_name in subjects:
-                markup.add(types.InlineKeyboardButton(f"📁 {sub_name}", callback_data=f"selectforfile_{sub_id}"))
-            bot.edit_message_text("🎯 اختر المادة المُراد رفع الملف بداخلها:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-        elif action == "selectforfile":
-            folder_id = int(data[1])
-            msg = bot.edit_message_text("📥 *قم بإرسال الملف الآن* (PDF، صورة، صوت، أو رابط نصي):\n\n⚠️ *ملاحظة:* إذا كان ملفاً أو صورة، اكتب اسم المحاضرة في وصف الملف (Caption) قبل الإرسال.", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-            bot.register_next_step_handler(msg, save_file_to_db, folder_id)
+            bot.edit_message_text(f"✅ تم حذف المجلد *({sub_name})* من الترم {term_num} بنجاح وتحديث القوائم.", 
+                                  call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        else:
+            bot.edit_message_text("❌ حدث خطأ، المادة غير موجودة أو تم حذفها مسبقاً.", call.message.chat.id, call.message.message_id)
 
 
-# 6. دوال استقبال البيانات المتقدمة (Next Step Handlers)
+# 6. وظائف استقبال المدخلات النصية (Next Step Handlers)
 
 def save_new_folder(message, term_num):
-    folder_name = message.text.strip() if message.text else ""
-    if folder_name == "" or folder_name.startswith('/') or "العودة" in folder_name:
-        bot.send_message(message.chat.id, "❌ تم إلغاء العملية.", reply_markup=admin_keyboard())
+    """تلقي اسم المادة الجديدة من الأدمن وحفظها في قاعدة البيانات"""
+    folder_name = message.text.strip()
+    
+    # الحماية من إدخال نصوص فارغة أو أوامر تخريبية أثناء خطوة التسجيل
+    if folder_name == "" or folder_name.startswith('/') or folder_name == "🔙 العودة للقائمة الرئيسية":
+        bot.send_message(message.chat.id, "❌ عملية إلغاء أو اسم مادة غير صالحة. تم التراجع عن الإضافة.", reply_markup=admin_keyboard())
         return
+
+    # إدخال المادة الجديدة وحفظ التغييرات
     cursor.execute("INSERT INTO folders (term, name) VALUES (?, ?)", (term_num, folder_name))
     conn.commit()
-    bot.send_message(message.chat.id, f"✅ تم حفظ مادة: *{folder_name}* بالترم {term_num}.", reply_markup=admin_keyboard(), parse_mode="Markdown")
-
-def save_file_to_db(message, folder_id):
-    file_id = None
-    file_type = None
-    file_name = "ملف غير مسمى"
-
-    if message.document:
-        file_id = message.document.file_id
-        file_type = "document"
-        file_name = message.caption if message.caption else message.document.file_name
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-        file_type = "photo"
-        file_name = message.caption if message.caption else "صورة مرفقة"
-    elif message.audio or message.voice:
-        file_id = message.audio.file_id if message.audio else message.voice.file_id
-        file_type = "audio"
-        file_name = message.caption if message.caption else "تسجيل صوتي"
-    elif message.text and not message.text.startswith('/'):
-        file_id = "none"
-        file_type = "text"
-        file_name = message.text
-
-    if not file_type:
-        bot.send_message(message.chat.id, "❌ صيغة غير مدعومة، تم إلغاء الرفع.", reply_markup=admin_keyboard())
-        return
-
-    cursor.execute("INSERT INTO files (folder_id, name, file_id, file_type) VALUES (?, ?, ?, ?)", (folder_id, file_name, file_id, file_type))
-    conn.commit()
-    bot.send_message(message.chat.id, f"✅ تم رفع وإضافة *({file_name})* بنجاح داخل المادة المحددة.", reply_markup=admin_keyboard(), parse_mode="Markdown")
-
-def broadcast_to_all(message):
-    if not message.text or message.text.startswith('/'):
-        bot.send_message(message.chat.id, "❌ تم إلغاء الإذاعة.", reply_markup=admin_keyboard())
-        return
     
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-    
-    bot.send_message(message.chat.id, f"📢 جاري بدء إرسال الإعلان إلى {len(users)} طالب...")
-    
-    success_count = 0
-    for user in users:
-        try:
-            bot.send_message(user[0], f"📢 *إعلان مهم من إدارة البوت:*\n\n{message.text}", parse_mode="Markdown")
-            success_count += 1
-        except Exception:
-            continue  # تخطي الحسابات المحظورة أو المعطلة
-            
-    bot.send_message(message.chat.id, f"✅ تم اكتمال الإذاعة بنجاح ووصلت لـ {success_count} طالب فعّال.", reply_markup=admin_keyboard())
+    bot.send_message(message.chat.id, f"✅ تم بنجاح إضافة مجلد المادة: *{folder_name}* إلى الترم {term_num}.", 
+                     reply_markup=admin_keyboard(), parse_mode="Markdown")
 
 
+# تشغيل واستمرار استقبال البيانات للبوت دون توقف
 if __name__ == '__main__':
-    print("🚀 البوت الذكي والجديد يعمل الآن بأعلى كفاءة...")
+    print("🚀 البوت المطور يعمل الآن بكفاءة عالية...")
     bot.infinity_polling()
