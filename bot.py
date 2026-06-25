@@ -14,7 +14,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-DB_PATH = os.path.join(os.path.dirname(__file__), "files.db")
+
+# التعديل الجديد: إعداد مسار ذاكرة دائم لا يُمسح أبداً
+DATA_DIR = "/app/data"
+# إذا كان المسار غير موجود (في حال التشغيل المحلي)، نستخدم نفس مسار الملف
+if not os.path.exists(DATA_DIR):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        DATA_DIR = os.path.dirname(__file__)
+
+DB_PATH = os.path.join(DATA_DIR, "files.db")
+
 
 PRIMARY_ADMIN = 7351394218
 
@@ -222,7 +233,6 @@ def admin_sections_keyboard(prefix: str):
     return InlineKeyboardMarkup(keyboard)
 
 
-# دالة ذكية لإرسال أي نوع من المحتوى (ملف، صورة، فيديو، رابط)
 async def send_stored_file(context, chat_id, file_id, file_name=None):
     if file_id.startswith("http"):
         name_part = f"🔗 *{file_name}*\n" if file_name and file_name != "رابط مفيد" else "🔗 "
@@ -364,7 +374,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row_id = int(data.replace("file_rename_req_", ""))
         context.user_data["waiting_for_new_filename"] = True
         context.user_data["edit_file_row_id"] = row_id
-        await query.edit_message_text("✏️ *تعديل الاسم*\n\nمن فضلك أرسل الاسم الجديد الآن كرسالة نصية هنا.\n(للملفات: سيقوم البوت بإعادة الرفع بالاسم الجديد السحري 🪄)", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")]]))
+        await query.edit_message_text("✏️ *تعديل الاسم*\n\nمن فضلك أرسل الاسم الجديد الآن كرسالة نصية هنا.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")]]))
 
     elif data.startswith("file_move_req_"):
         if not is_admin(user_id): return
@@ -453,7 +463,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ تم إزالة المشرف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_manage_users")]]))
 
 
-# دالة شاملة لاستقبال الميديا والملفات
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_admin(user_id):
@@ -465,7 +474,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = msg.document.file_id
         file_name = msg.document.file_name or "ملف_بدون_اسم"
     elif msg.photo:
-        file_id = msg.photo[-1].file_id # أعلى جودة
+        file_id = msg.photo[-1].file_id 
         file_name = f"صورة_{file_id[-6:]}.jpg"
     elif msg.video:
         file_id = msg.video.file_id
@@ -520,7 +529,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text.strip()
 
     if is_admin(user_id):
-        # ميزة حفظ الروابط للمشرفين
         if text.startswith("http://") or text.startswith("https://"):
             context.user_data["pending_file_id"] = text
             context.user_data["pending_file_name"] = "رابط مفيد"
@@ -539,7 +547,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"🔗 استلمت الرابط.\n\nاختر القسم لحفظه فيه:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
-        # التعديل السحري للاسم
         if context.user_data.get("waiting_for_new_filename"):
             row_id = context.user_data.get("edit_file_row_id")
             if row_id is not None:
@@ -550,7 +557,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                     old_file_id, old_file_name = file_info
                     
                     if old_file_id.startswith("http"):
-                        # الروابط نغير اسمها فقط في قاعدة البيانات
                         update_file_name_in_db(row_id, new_name)
                         await update.message.reply_text(
                             f"✅ تم تعديل عنوان الرابط بنجاح إلى:\n*\"{new_name}\"*",
@@ -558,14 +564,13 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="admin_panel")]])
                         )
                     else:
-                        # للملفات والصور والفيديو نقوم بإعادة الرفع
                         _, ext = os.path.splitext(old_file_name)
                         if not ext:
                             ext = ".pdf" 
                         if not new_name.lower().endswith(ext.lower()):
                             new_name += ext
 
-                        processing_msg = await update.message.reply_text("⏳ جاري سحب الملف وإعادة تسميته ورفعه... قد يستغرق ثواني.")
+                        processing_msg = await update.message.reply_text("⏳ جاري سحب الملف وإعادة تسميته ورفعه...")
 
                         try:
                             tg_file = await context.bot.get_file(old_file_id)
@@ -580,21 +585,20 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                             update_file_in_db(row_id, new_name, new_file_id)
 
                             await processing_msg.edit_text(
-                                f"✅ اكتمل السحر! تم تغيير الاسم الفعلي إلى:\n*\"{new_name}\"*",
+                                f"✅ تم تغيير الاسم الفعلي بنجاح إلى:\n*\"{new_name}\"*",
                                 parse_mode="Markdown",
-                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_panel")]])
+                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="admin_panel")]])
                             )
                         except Exception as e:
-                            logger.error(f"خطأ في تغيير اسم الملف: {e}")
+                            logger.error(f"خطأ في تغيير الاسم: {e}")
                             await processing_msg.edit_text(
-                                "⚠️ عذراً، لم أتمكن من إعادة رفع الملف (قد يكون حجمه كبيراً جداً بالنسبة لقيود التليجرام).\n\n"
-                                "💡 **نصيحة:** قم بتعديل اسمه من هاتفك وارفعه كملف جديد.",
+                                "⚠️ عذراً، لم أتمكن من إعادة رفع الملف بسبب كبر حجمه.\n"
+                                "قم بتعديل اسمه من جهازك وارفعه كملف جديد.",
                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="admin_panel")]])
                             )
             context.user_data.clear()
             return
 
-        # إضافة مشرفين
         if context.user_data.get("waiting_for_admin_id"):
             if not text.isdigit():
                 await update.message.reply_text("⚠️ يرجى إرسال الـ ID كأرقام فقط.")
@@ -605,10 +609,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.clear()
             return
 
-    # --- 2. البحث الافتراضي المباشر ---
+    # --- 2. البحث ---
     results = search_files_by_name(text)
     if not results:
-        await update.message.reply_text(f"🔍 لم أجد أي محتوى يحتوي على الاسم: *\"{text}\"* 😢\n\nتأكد من الحروف.", parse_mode="Markdown")
+        await update.message.reply_text(f"🔍 لم أجد أي محتوى يحتوي على: *\"{text}\"* 😢", parse_mode="Markdown")
         return
     
     keyboard = []
@@ -616,7 +620,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard.append([InlineKeyboardButton(f"📄 {file_name}", callback_data=f"send_file_{row_id}")])
     keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back_main")])
     
-    await update.message.reply_text(f"🔍 *نتائج البحث عن:* \"{text}\"\n\nاضغط على المحتوى للتحميل:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"🔍 *نتائج البحث عن:* \"{text}\"\n\nاضغط للتحميل:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 def main():
@@ -640,11 +644,7 @@ def main():
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(save_file_handler, pattern=r"^save_|^cancel_save$"))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
-    # التقاط كل أنواع الملفات والميديا!
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_media))
-    
-    # التقاط الروابط والبحث
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
