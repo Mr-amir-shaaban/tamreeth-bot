@@ -98,10 +98,11 @@ def delete_file_by_id(row_id: int):
     conn.close()
 
 
-def update_file_name_in_db(row_id: int, new_name: str):
+# دالة تحديث الاسم و ID الملف بعد إعادة رفعه
+def update_file_in_db(row_id: int, new_name: str, new_file_id: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE files SET file_name = ? WHERE id = ?", (new_name, row_id))
+    c.execute("UPDATE files SET file_name = ?, file_id = ? WHERE id = ?", (new_name, new_file_id, row_id))
     conn.commit()
     conn.close()
 
@@ -114,7 +115,6 @@ def move_file_in_db(row_id: int, new_subject_id: str):
     conn.close()
 
 
-# دالة البحث المعدلة لتجلب رقم ID الصغير لتجنب مشكلة حجم أزرار التليجرام
 def search_files_by_name(query_text: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -123,7 +123,7 @@ def search_files_by_name(query_text: str):
     conn.close()
     return rows
 
-# دالة جديدة مساعدة لجلب الملف عبر رقمه
+
 def get_file_id_by_row_id(row_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -131,6 +131,16 @@ def get_file_id_by_row_id(row_id: int):
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
+
+
+# دالة لجلب معلومات الملف كاملة للتعديل عليها
+def get_file_info_by_row_id(row_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT file_id, file_name FROM files WHERE id = ?", (row_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
 
 
 def get_all_admins():
@@ -281,7 +291,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back_main")]])
         )
 
-    # التعديل هنا لحل مشكلة إرسال الملف من البحث
     elif data.startswith("send_file_"):
         row_id = int(data.replace("send_file_", ""))
         file_id = get_file_id_by_row_id(row_id)
@@ -336,7 +345,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user_id): return
         row_id = int(data.replace("file_manage_", ""))
         keyboard = [
-            [InlineKeyboardButton("✏️ تعديل اسم الملف", callback_data=f"file_rename_req_{row_id}")],
+            [InlineKeyboardButton("✏️ تعديل اسم الملف الفعلي", callback_data=f"file_rename_req_{row_id}")],
             [InlineKeyboardButton("📦 نقل الملف لقسم آخر", callback_data=f"file_move_req_{row_id}")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="admin_edit_files_select")]
         ]
@@ -347,7 +356,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row_id = int(data.replace("file_rename_req_", ""))
         context.user_data["waiting_for_new_filename"] = True
         context.user_data["edit_file_row_id"] = row_id
-        await query.edit_message_text("✏️ *تعديل اسم الملف*\n\nمن فضلك أرسل الاسم الجديد للملف الآن كرسالة نصية هنا.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")]]))
+        await query.edit_message_text("✏️ *تعديل اسم الملف الفعلي*\n\nمن فضلك أرسل الاسم الجديد للملف الآن كرسالة نصية هنا.\n(سيقوم البوت بإعادة رفع الملف باسمه الجديد تلقائياً 🪄)", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")]]))
 
     elif data.startswith("file_move_req_"):
         if not is_admin(user_id): return
@@ -493,15 +502,54 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # --- 1. التحقق من حالات المشرف ---
     if is_admin(user_id):
+        
+        # نظام إعادة رفع الملف لتغيير اسمه الفعلي
         if context.user_data.get("waiting_for_new_filename"):
             row_id = context.user_data.get("edit_file_row_id")
             if row_id is not None:
-                update_file_name_in_db(row_id, text)
-                await update.message.reply_text(
-                    f"✅ تم تعديل اسم الملف بنجاح إلى:\n*\"{text}\"*",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_panel")]])
-                )
+                new_name = text
+                file_info = get_file_info_by_row_id(row_id)
+                
+                if file_info:
+                    old_file_id, old_file_name = file_info
+                    
+                    # المحافظة على صيغة الملف الأصلية (مثال: .pdf)
+                    _, ext = os.path.splitext(old_file_name)
+                    if not ext:
+                        ext = ".pdf" # كصيغة افتراضية
+                    if not new_name.lower().endswith(ext.lower()):
+                        new_name += ext
+
+                    processing_msg = await update.message.reply_text("⏳ جاري تحميل الملف، تغيير اسمه، وإعادة رفعه في الخفاء. يرجى الانتظار ثوانٍ قليلة...")
+
+                    try:
+                        # 1. تنزيل الملف من تليجرام للخادم
+                        tg_file = await context.bot.get_file(old_file_id)
+                        downloaded_bytes = await tg_file.download_as_bytearray()
+
+                        # 2. إعادة رفعه كملف جديد بالاسم المعدل
+                        sent_msg = await update.message.reply_document(
+                            document=downloaded_bytes,
+                            filename=new_name,
+                            caption=f"✅ هذه هي النسخة الجديدة للملف بعد تغيير اسمه إلى: {new_name}"
+                        )
+                        new_file_id = sent_msg.document.file_id
+
+                        # 3. تحديث قاعدة البيانات بالاسم الجديد والـ ID الجديد
+                        update_file_in_db(row_id, new_name, new_file_id)
+
+                        await processing_msg.edit_text(
+                            f"✅ تم سحر البوت! تم تغيير اسم الملف الفعلي بنجاح إلى:\n*\"{new_name}\"*",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_panel")]])
+                        )
+                    except Exception as e:
+                        logger.error(f"خطأ في تغيير اسم الملف: {e}")
+                        await processing_msg.edit_text(
+                            "⚠️ عذراً، فشل البوت في إعادة رفع الملف. عادة يحدث هذا إذا كان حجم الملف يتخطى 20 ميجابايت (قيود تليجرام).\n\n"
+                            "💡 **الحل البديل:** قم بتعديل اسم الملف من هاتفك ثم ارفعه للبوت مرة أخرى كملف جديد.",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="admin_panel")]])
+                        )
             context.user_data.clear()
             return
 
@@ -515,8 +563,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.clear()
             return
 
-    # --- 2. البحث والتعديل الخاص بالأزرار ---
-    # التعديل هنا لإنشاء الزر بالرقم التسلسلي
+    # --- 2. البحث الافتراضي المباشر ---
     results = search_files_by_name(text)
     if not results:
         await update.message.reply_text(f"🔍 لم أجد أي ملف يحتوي على الاسم: *\"{text}\"* 😢\n\nتأكد من الحروف أو تصفح المواد.", parse_mode="Markdown")
