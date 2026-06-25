@@ -45,7 +45,7 @@ def init_db():
             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # جدول المشرفين الجديد
+    # جدول المشرفين
     c.execute("""
         CREATE TABLE IF NOT EXISTS admins (
             admin_id INTEGER PRIMARY KEY,
@@ -103,18 +103,31 @@ def delete_file_by_id(row_id: int):
     conn.close()
 
 
-# --- دالات البحث عن الملفات في قاعدة البيانات ---
+def update_file_name_in_db(row_id: int, new_name: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE files SET file_name = ? WHERE id = ?", (new_name, row_id))
+    conn.commit()
+    conn.close()
+
+
+def move_file_in_db(row_id: int, new_subject_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE files SET subject_id = ? WHERE id = ?", (new_subject_id, row_id))
+    conn.commit()
+    conn.close()
+
+
 def search_files_by_name(query_text: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # البحث باستخدام LIKE للبحث الجزئي وغير الحساس لحالة الأحرف
     c.execute("SELECT file_id, file_name FROM files WHERE file_name LIKE ? LIMIT 10", (f"%{query_text}%",))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-# --- دالات إدارة المشرفين في قاعدة البيانات ---
 def get_all_admins():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -165,7 +178,7 @@ def main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("📚 القسم التمهيدي", callback_data="intro")],
         [InlineKeyboardButton("📖 المواد الدراسية", callback_data="subjects")],
-        [InlineKeyboardButton("🔍 بحث عن ملف", callback_data="user_search_click")], # زر البحث الجديد
+        [InlineKeyboardButton("🔍 بحث عن ملف", callback_data="user_search_click")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -189,6 +202,7 @@ def back_keyboard(back_target="subjects"):
 def admin_panel_keyboard():
     keyboard = [
         [InlineKeyboardButton("➕ إضافة ملفات", callback_data="admin_add_info")],
+        [InlineKeyboardButton("📝 إدارة وتعديل الملفات", callback_data="admin_edit_files_select")],
         [InlineKeyboardButton("🗑 حذف ملف", callback_data="admin_delete_select")],
         [InlineKeyboardButton("📊 إحصائيات", callback_data="admin_stats")],
         [InlineKeyboardButton("👥 إدارة المشرفين", callback_data="admin_manage_users")],
@@ -197,30 +211,28 @@ def admin_panel_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
-def admin_delete_sections_keyboard():
+def admin_sections_keyboard(prefix: str):
     keyboard = []
     for sid, name in ALL_SECTIONS:
         count = count_files(sid)
         label = f"{name} ({count})"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"admin_del_section_{sid}")])
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"{prefix}_{sid}")])
     keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # تنظيف أي حالات إدخال سابقة عند البدء من جديد
-    context.user_data.pop("waiting_for_admin_id", None)
-    context.user_data.pop("waiting_for_search_query", None)
+    for key in list(context.user_data.keys()):
+        context.user_data.pop(key, None)
     
     text = (
         f"👋 أهلاً {user.first_name}!\n\n"
         "🎓 *تمريض مكثف - مايو 2026*\n\n"
         "مرحباً بك في بوت المواد الدراسية.\n"
-        "اختر من القائمة أدناه أو استخدم ميزة البحث لراحة أسرع:"
+        "اختر من القائمة أدناه:"
     )
-    kb = main_menu_keyboard()
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,8 +240,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
-    context.user_data.pop("waiting_for_admin_id", None)
-    context.user_data.pop("waiting_for_search_query", None)
+    for key in list(context.user_data.keys()):
+        context.user_data.pop(key, None)
     await update.message.reply_text(
         "🔧 *لوحة المشرف*\n\nمرحباً بك يا مشرف! اختر ما تريد:",
         parse_mode="Markdown",
@@ -243,7 +255,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
 
-    # إلغاء حالات الانتظار إذا ضغط على أزرار أخرى خارج السياق
+    # تنظيف مؤقت للحالات عند الضغط على أزرار أخرى
     if data != "admin_add_new_click":
         context.user_data.pop("waiting_for_admin_id", None)
     if data != "user_search_click":
@@ -300,11 +312,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=subjects_keyboard()
         )
 
-    # --- معالجة زر البحث الخاص بالطالب ---
     elif data == "user_search_click":
         context.user_data["waiting_for_search_query"] = True
         await query.edit_message_text(
-            "🔍 *البحث الذكي عن الملفات*\n\nمن فضلك اكتب اسم الملف أو جزءاً منه (باللغة الإنجليزية أو العربية كما هو مرفوع)، وأرسله لي في رسالة.",
+            "🔍 *البحث الذكي عن الملفات*\n\nمن فضلك اكتب اسم الملف أو جزءاً منه وأرسله لي كرسالة نصية الآن.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء وعودة", callback_data="back_main")]])
         )
@@ -314,10 +325,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_document(chat_id=query.message.chat_id, document=file_id)
         except Exception as e:
-            await query.message.reply_text("⚠️ عذراً، تعذر إرسال هذا الملف المحدد.")
-            logger.error(f"خطأ إرسال ملف عبر البحث: {e}")
+            await query.message.reply_text("⚠️ عذراً، تعذر إرسال هذا الملف.")
 
-    # --- لوحة التحكم بالمشرفين ---
+    # --- إدارة المشرف ولوحة التحكم ---
     elif data == "admin_panel":
         if not is_admin(user_id):
             await query.answer("⛔ غير مصرح لك.", show_alert=True)
@@ -333,9 +343,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
         await query.edit_message_text(
-            "➕ *إضافة ملفات*\n\n"
-            "ببساطة أرسل أي ملف لهذه المحادثة وسيُطلب منك تحديد القسم أو المادة.\n\n"
-            "يمكنك إرسال عدة ملفات تباعاً.",
+            "➕ *إضافة ملفات*\n\nأرسل أي ملف للمحادثة وسيطلب منك تحديد قسمه فوراً.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
         )
@@ -357,6 +365,76 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
         )
 
+    # --- نظام تعديل ونقل الملفات الجديد ---
+    elif data == "admin_edit_files_select":
+        if not is_admin(user_id):
+            await query.answer("⛔ غير مصرح لك.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "📝 *إدارة وتعديل الملفات*\n\nاختر القسم الذي يحتوي على الملفات لتعديلها أو نقلها:",
+            parse_mode="Markdown",
+            reply_markup=admin_sections_keyboard("admin_edsec")
+        )
+
+    elif data.startswith("admin_edsec_"):
+        if not is_admin(user_id):
+            return
+        sid = data.replace("admin_edsec_", "")
+        files = get_all_files_with_ids(sid)
+        if not files:
+            await query.answer("⚠️ لا توجد ملفات في هذا القسم لتعديلها.", show_alert=True)
+            return
+        keyboard = []
+        for row_id, file_id, file_name in files:
+            keyboard.append([InlineKeyboardButton(f"⚙️ {file_name}", callback_data=f"file_manage_{row_id}")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_edit_files_select")])
+        await query.edit_message_text("⚙️ اختر الملف المُراد تعديل اسمه أو نقله:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("file_manage_"):
+        if not is_admin(user_id):
+            return
+        row_id = int(data.replace("file_manage_", ""))
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ تعديل اسم الملف", callback_data=f"file_rename_req_{row_id}")],
+            [InlineKeyboardButton("📦 نقل الملف لقسم آخر", callback_data=f"file_move_req_{row_id}")],
+            [InlineKeyboardButton("🔙 رجوع للملفات", callback_data="admin_edit_files_select")]
+        ]
+        await query.edit_message_text("⚙️ *خيارات التحكم بالملف:*\n\nماذا تريد أن تفعل بالملف المحدد؟", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("file_rename_req_"):
+        if not is_admin(user_id):
+            return
+        row_id = int(data.replace("file_rename_req_", ""))
+        context.user_data["edit_file_row_id"] = row_id
+        context.user_data["waiting_for_new_filename"] = True
+        await query.edit_message_text(
+            "✏️ *تعديل اسم الملف*\n\nمن فضلك أرسل الاسم الجديد للملف الآن كرسالة نصية هنا.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")]])
+        )
+
+    elif data.startswith("file_move_req_"):
+        if not is_admin(user_id):
+            return
+        row_id = int(data.replace("file_move_req_", ""))
+        keyboard = []
+        for sid, name in ALL_SECTIONS:
+            keyboard.append([InlineKeyboardButton(f"➡️ إلى: {name}", callback_data=f"file_move_to_{row_id}_{sid}")])
+        keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")])
+        await query.edit_message_text("📦 *نقل الملف*\n\nاختر القسم الجديد الذي تود نقل الملف إليه فوراً:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("file_move_to_"):
+        if not is_admin(user_id):
+            return
+        parts = data.replace("file_move_to_", "").split("_", 1)
+        row_id = int(parts[0])
+        new_sid = parts[1]
+        move_file_in_db(row_id, new_sid)
+        target_name = next((name for s_id, name in ALL_SECTIONS if s_id == new_sid), "غير معروف")
+        await query.edit_message_text(f"✅ تم نقل الملف بنجاح إلى قسم: *{target_name}*.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة المشرف", callback_data="admin_panel")]]))
+
+    # --- نظام الحذف ---
     elif data == "admin_delete_select":
         if not is_admin(user_id):
             await query.answer("⛔ غير مصرح لك.", show_alert=True)
@@ -364,14 +442,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🗑 *حذف ملف*\n\nاختر القسم أو المادة:",
             parse_mode="Markdown",
-            reply_markup=admin_delete_sections_keyboard()
+            reply_markup=admin_sections_keyboard("admin_delsec")
         )
 
-    elif data.startswith("admin_del_section_"):
+    elif data.startswith("admin_delsec_"):
         if not is_admin(user_id):
-            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
-        sid = data.replace("admin_del_section_", "")
+        sid = data.replace("admin_delsec_", "")
         section_name = next((name for s_id, name in ALL_SECTIONS if s_id == sid), "غير معروف")
         files = get_all_files_with_ids(sid)
         if not files:
@@ -379,18 +456,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = []
         for row_id, file_id, file_name in files:
-            label = f"🗑 {file_name or 'ملف'}"
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"admin_del_file_{row_id}_{sid}")])
+            keyboard.append([InlineKeyboardButton(f"🗑 {file_name or 'ملف'}", callback_data=f"admin_del_file_{row_id}_{sid}")])
         keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_delete_select")])
-        await query.edit_message_text(
-            f"🗑 *حذف من: {section_name}*\n\nاختر الملف للحذف:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text(f"🗑 *حذف من: {section_name}*\n\nاختر الملف للحذف الدائم:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("admin_del_file_"):
         if not is_admin(user_id):
-            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
         parts = data.replace("admin_del_file_", "").split("_", 1)
         row_id = int(parts[0])
@@ -398,75 +469,58 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         delete_file_by_id(row_id)
         section_name = next((name for s_id, name in ALL_SECTIONS if s_id == sid), "غير معروف")
         remaining = count_files(sid)
-        await update.effective_message.reply_text(f"✅ تم حذف الملف بنجاح.")
         await query.edit_message_text(
-            f"✅ تم حذف الملف من *{section_name}*.\n"
-            f"📊 الملفات المتبقية: {remaining}",
+            f"✅ تم حذف الملف بنجاح من *{section_name}*.\n📊 المتبقي: {remaining} ملف.",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع للوحة", callback_data="admin_panel")]])
         )
 
+    # --- إدارة المشرفين عبر البوت ---
     elif data == "admin_manage_users":
         if not is_admin(user_id):
-            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
         admins = get_all_admins()
         text = "👥 *إدارة مشرفي البوت*\n\nالمشرفون الحاليون:\n"
         for idx, adm_id in enumerate(admins, 1):
             tag = " [المالك الأساسي]" if adm_id == PRIMARY_ADMIN else ""
             text += f"{idx}. `{adm_id}`{tag}\n"
-        
-        kb = [
+        keyboard = [
             [InlineKeyboardButton("➕ إضافة مشرف جديد", callback_data="admin_add_new_click")],
             [InlineKeyboardButton("🗑 حذف مشرف", callback_data="admin_remove_select")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]
         ]
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "admin_add_new_click":
         if not is_admin(user_id):
-            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
         context.user_data["waiting_for_admin_id"] = True
         await query.edit_message_text(
-            "📥 *إضافة مشرف جديد*\n\nمن فضلك قم بإرسال الـ **ID** الخاص بالمشرف الجديد كرسالة نصية الآن.",
+            "📥 *إضافة مشرف جديد*\n\nمن فضلك أرسل الـ **ID** الخاص بالمشرف الجديد كرسالة نصية الآن.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_manage_users")]])
         )
 
     elif data == "admin_remove_select":
         if not is_admin(user_id):
-            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
         admins = get_all_admins()
         sub_admins = [a for a in admins if a != PRIMARY_ADMIN]
-        
         if not sub_admins:
             await query.answer("⚠️ لا يوجد مشرفون مضافون لحذفهم.", show_alert=True)
             return
-            
-        kb = []
+        keyboard = []
         for adm_id in sub_admins:
-            kb.append([InlineKeyboardButton(f"❌ حذف {adm_id}", callback_data=f"admin_confirm_del_{adm_id}")])
-        kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_manage_users")])
-        
-        await query.edit_message_text(
-            "🗑 *اختر المشرف المراد حذفه من البوت:*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+            keyboard.append([InlineKeyboardButton(f"❌ حذف {adm_id}", callback_data=f"admin_confirm_del_{adm_id}")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_manage_users")])
+        await query.edit_message_text("🗑 *اختر المشرف المراد حذفه من البوت:*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("admin_confirm_del_"):
         if not is_admin(user_id):
-            await query.answer("⛔ غير مصرح لك.", show_alert=True)
             return
         target_id = int(data.replace("admin_confirm_del_", ""))
         remove_admin(target_id)
-        await query.edit_message_text(
-            f"✅ تم إزالة المشرف صاحب الـ ID: `{target_id}` بنجاح.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع لإدارة المشرفين", callback_data="admin_manage_users")]])
-        )
+        await query.edit_message_text(f"✅ تم إزالة المشرف بنجاح.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_manage_users")]]))
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -494,7 +548,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel_save")])
 
     await update.message.reply_text(
-        f"📎 استلمت الملف: *{doc.file_name}*\n\nاختر القسم أو المادة لإضافته إليها:",
+        f"📎 استلمت الملف: *{doc.file_name}*\n\nاختر القسم لحفظه فيه:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -503,15 +557,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # 1. التحقق من حالة "انتظار البحث عن ملف" (متاحة للجميع: طلاب ومشرفين)
+    # 1. حالة البحث للكل
     if context.user_data.get("waiting_for_search_query"):
         search_query = update.message.text.strip()
-        context.user_data.pop("waiting_for_search_query", None) # إنهاء الحالة
+        context.user_data.pop("waiting_for_search_query", None)
         
         results = search_files_by_name(search_query)
         if not results:
             await update.message.reply_text(
-                f"🔍 لم أجد أي ملف يحتوي على المسمى: *\"{search_query}\"* 😢\n\nتأكد من كتابة الاسم بشكل صحيح، أو تصفح المواد يدوياً.",
+                f"🔍 لم أجد أي ملف يحتوي على الاسم: *\"{search_query}\"* 😢",
                 parse_mode="Markdown",
                 reply_markup=main_menu_keyboard()
             )
@@ -523,30 +577,41 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back_main")])
         
         await update.message.reply_text(
-            f"🔍 *نتائج البحث عن:* \"{search_query}\"\n\nاضغط على اسم الملف أدناه ليتم إرساله لك فوراً:",
+            f"🔍 *نتائج البحث عن:* \"{search_query}\"\n\nاضغط على اسم الملف للتحميل المباشر:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
-    # 2. التحقق من حالات المشرفين (للمشرفين فقط)
+    # 2. حالات المشرفين الخاصة بالتعديل والإضافة
     if is_admin(user_id):
+        # ميزة تعديل اسم الملف
+        if context.user_data.get("waiting_for_new_filename"):
+            new_name = update.message.text.strip()
+            row_id = context.user_data.get("edit_file_row_id")
+            
+            update_file_name_in_db(row_id, new_name)
+            
+            context.user_data.pop("waiting_for_new_filename", None)
+            context.user_data.pop("edit_file_row_id", None)
+            
+            await update.message.reply_text(
+                f"✅ تم تعديل اسم الملف بنجاح إلى:\n*\"{new_name}\"*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_panel")]])
+            )
+            return
+
+        # ميزة إضافة مشرف جديد
         if context.user_data.get("waiting_for_admin_id"):
             text = update.message.text.strip()
             if not text.isdigit():
-                await update.message.reply_text("⚠️ خطأ! يرجى إرسال الـ ID كأرقام فقط بدون حروف.")
+                await update.message.reply_text("⚠️ يرجى إرسال الـ ID كأرقام فقط.")
                 return
-            
             new_admin_id = int(text)
             if add_admin(new_admin_id):
                 context.user_data.pop("waiting_for_admin_id", None)
-                await update.message.reply_text(
-                    f"✅ تم بنجاح إضافة المشرف الجديد!\n🆔 الـ ID: `{new_admin_id}`\n\nيمكنه الآن استخدام أمر `/admin` للتحكم بالبوت.",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ العودة لإدارة المشرفين", callback_data="admin_manage_users")]])
-                )
-            else:
-                await update.message.reply_text("❌ حدث خطأ أثناء الحفظ في قاعدة البيانات.")
+                await update.message.reply_text(f"✅ تم إضافة المشرف `{new_admin_id}` بنجاح.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_manage_users")]]))
 
 
 async def save_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -557,30 +622,24 @@ async def save_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cancel_save":
         context.user_data.pop("pending_file_id", None)
         context.user_data.pop("pending_file_name", None)
-        await query.edit_message_text("❌ تم إلغاء العملية.")
+        await query.edit_message_text("❌ تم إلغاء عملية الحفظ.")
         return
 
     if data.startswith("save_"):
         sid = data.split("_", 1)[1]
         section_name = next((name for s_id, name in ALL_SECTIONS if s_id == sid), "غير معروف")
-
         file_id = context.user_data.get("pending_file_id")
         file_name = context.user_data.get("pending_file_name", "ملف")
 
         if not file_id:
-            await query.edit_message_text("⚠️ انتهت صلاحية الملف، أرسله مجدداً.")
+            await query.edit_message_text("⚠️ انتهت صلاحية الجلسة، يرجى إعادة إرسال الملف.")
             return
 
         save_file(sid, file_id, file_name)
         context.user_data.pop("pending_file_id", None)
         context.user_data.pop("pending_file_name", None)
         total = count_files(sid)
-
-        await query.edit_message_text(
-            f"✅ تم حفظ *{file_name}* في *{section_name}* بنجاح!\n"
-            f"📊 إجمالي الملفات في هذا القسم: {total}",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"✅ تم حفظ *{file_name}* في قسم *{section_name}* بنجاح.\n📊 الإجمالي: {total} ملف.", parse_mode="Markdown")
 
 
 def main():
@@ -592,29 +651,19 @@ def main():
 
     async def post_init(application: Application):
         from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
-
-        public_commands = [
-            BotCommand("start", "🏠 القائمة الرئيسية"),
-        ]
-        await application.bot.set_my_commands(
-            public_commands,
-            scope=BotCommandScopeAllPrivateChats()
-        )
+        public_commands = [BotCommand("start", "🏠 القائمة الرئيسية")]
+        await application.bot.set_my_commands(public_commands, scope=BotCommandScopeAllPrivateChats())
 
         admin_commands = [
             BotCommand("start", "🏠 القائمة الرئيسية"),
             BotCommand("admin", "🔧 لوحة المشرف"),
         ]
-        
         admins = get_all_admins()
         for admin_id in admins:
             try:
-                await application.bot.set_my_commands(
-                    admin_commands,
-                    scope=BotCommandScopeChat(chat_id=admin_id)
-                )
+                await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
             except Exception as e:
-                logger.warning(f"لم يتم تعيين أوامر المشرف للمستخدم {admin_id}: {e}")
+                pass
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
@@ -625,7 +674,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 
-    logger.info("🤖 البوت يعمل الآن مع ميزة البحث الذكي للملفات...")
+    logger.info("🤖 البوت يعمل مع كامل الميزات والتنظيف التام...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
